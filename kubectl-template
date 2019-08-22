@@ -1,0 +1,217 @@
+#!/bin/bash
+
+usage() {
+  cat<<EOF
+
+
+usage: $(basename $0) psp NAME [SERVICEACCOUNT] [OWNER]
+       $(basename $0) pod NAME [SERVICEACCOUNT] [OWNER]
+       $(basename $0) event NAME
+
+Creates psp, role, rolebinding and (optionally) a service account
+for a custom pod security policy
+
+args:
+  NAME           name to be used for psp, role and rolebinding (all three will be
+                 prefixed with 'psp-' or 'psp:'
+  SERVICEACCOUNT allow SERVICEACCOUNT to use this psp -- otherwise
+                 a service account with name NAME will be created
+  OWNER          if set, add an annotation with owner=OWNER to all resources
+
+EOF
+}
+
+name=$2
+test -n "${name:?"$(usage)"}"
+
+sa=${3}
+
+owner=${4:+owner: ${4}}
+
+create_psp() {
+  local sa=${sa:=${name}}
+
+if [ "${sa}" = "${name}" ]
+then
+cat<<EOF
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  annotations:
+    ${owner}
+  name: ${name}
+EOF
+fi
+
+cat <<EOF
+---
+# adjust the psp to your needs
+apiVersion: policy/v1beta1
+kind: PodSecurityPolicy
+metadata:
+  name: psp-${name}
+  annotations:
+    ${owner}
+    seccomp.security.alpha.kubernetes.io/allowedProfileNames: 'docker/default'
+    seccomp.security.alpha.kubernetes.io/defaultProfileName: 'docker/default'
+spec:
+  privileged: false
+  # Required to prevent escalations to root.
+  allowPrivilegeEscalation: false
+  # This is redundant with non-root + disallow privilege escalation,
+  # but we can provide it for defense in depth.
+  # requiredDropCapabilities:
+  #   - ALL
+  # Allow core volume types.
+  volumes:
+    - 'configMap'
+    - 'emptyDir'
+    - 'projected'
+    - 'secret'
+    - 'downwardAPI'
+    # Assume that persistentVolumes set up by the cluster admin are safe to use.
+    - 'persistentVolumeClaim'
+  hostNetwork: false
+  hostIPC: false
+  hostPID: false
+  runAsUser:
+  # Require the container to run without root privileges.
+  #  rule: 'MustRunAsNonRoot'
+    rule: 'RunAsAny'
+  seLinux:
+    # This policy assumes the nodes are using AppArmor rather than SELinux.
+    rule: 'RunAsAny'
+  # supplementalGroups:
+  #   rule: 'MustRunAs'
+  #   ranges:
+  #     # Forbid adding the root group.
+  #     - min: 1
+  #       max: 65535
+  # fsGroup:
+  #   rule: 'MustRunAs'
+  #   ranges:
+  #     # Forbid adding the root group.
+  #     - min: 1
+  #       max: 65535
+  supplementalGroups:
+    rule: 'RunAsAny'
+  fsGroup:
+    rule: 'RunAsAny'
+  readOnlyRootFilesystem: false
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  annotations:
+    ${owner}
+  name: psp:${name}
+rules:
+  - apiGroups:
+      - policy
+    resourceNames:
+      - psp-${name}
+    resources:
+      - podsecuritypolicies
+    verbs:
+      - use
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  annotations:
+    ${owner}
+  name: psp:${name}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: psp:${name}
+subjects:
+  - kind: ServiceAccount
+    name: ${sa}
+
+# uncomment to grant access to psp to every service account
+# - apiGroup: rbac.authorization.k8s.io
+#   kind: Group
+#   name: system:serviceaccounts
+
+# uncomment to grant access to psp to every authenticated user
+# - apiGroup: rbac.authorization.k8s.io
+#   kind: Group
+#   name: system:authenticated
+EOF
+}
+
+create_pod() {
+  cat<<EOF
+apiVersion: v1
+kind: Pod
+metadata:
+  name: ${name}
+  annotations:
+    ${owner}
+  labels:
+    app: ${name}
+spec:
+  #activeDeadlineSeconds: 10
+  #imagePullSecrets: [...]
+  #restartPolicy: Never # One of Always, OnFailure, Never. Default to Always.
+  #securityContext: https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.15/#podsecuritycontext-v1-core
+  serviceAccountName: ${sa:-default}
+  terminationGracePeriodSeconds: 5
+  #tolerations: https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.15/#toleration-v1-core
+  #volumes: [...] # https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.15/#volume-v1-core
+  #initContainers:
+  #- name: hello
+  #  image: alpine
+  #  command: ['sh', '-c', 'echo Hello Kubernetes!']
+  containers:
+  - name: ${name}
+    image: alpine
+    command: ['sh', '-c', 'echo Hello Kubernetes! && sleep 3600']
+    # command == entrypoint, not shell wrapped
+    # args == cmd
+    #args: [...]
+    #env: https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.15/#envvar-v1-core
+    # - name: foo
+    #   value: bar
+    #   valueFrom: https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.15/#envvarsource-v1-core
+    #lifecycle: https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.15/#lifecycle-v1-core (postStart / preStart)
+    #livenessProbe: https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.15/#probe-v1-core
+    #readinessProbe
+    #ports: https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.15/#containerport-v1-core
+    #securityContext: https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.15/#securitycontext-v1-core
+    #stdin: false
+    #terminationMessagePath: /dev/termination-log
+    #volumeMounts: [...] # https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.15/#volumemount-v1-core
+    #workingDir: 
+EOF
+}
+
+create_event() {
+  cat<<EOF
+apiVersion: v1
+kind: Event
+metadata:
+  name: ${name}
+  annotations:
+    ${owner}
+message: "hello"
+involvedObject:
+  apiVersion: v1
+  kind: Pod
+  name: foo
+  namespace: s4echo
+eventTime: $(date -u +%Y-%m-%dT%H:%M:%S.000000Z)
+firstTimestamp: $(date -u +%Y-%m-%dT%H:%M:%S.000000Z)
+lastTimestamp: $(date -u +%Y-%m-%dT%H:%M:%S.000000Z)
+reason: "because"
+reportingComponent: "jindra.io/git-trigger"
+reportingInstance: "id"
+type: normal
+action: new-commit
+
+EOF
+}
+
+create_$1
